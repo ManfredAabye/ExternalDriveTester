@@ -1,11 +1,25 @@
+# ExternalDriveTester
+# Ein Tool zum Testen von externen Laufwerken (USB-Sticks, SD-Karten, externe Festplatten).
+# Funktionen:
+# - Kapazitätsprüfung (verifizierte Schreib-/Lese-Tests)
+# - Geschwindigkeitsmessung (Schreib-/Lesegeschwindigkeit)
+# - Integritätstest (Datenkonsistenzprüfung)
+# - Backup/Restore ganzer Laufwerke als ZIP-Archiv
+# Konfiguration über externe JSON-Datei (z. B. unterstützte Sprachen, Theme, Testgrößen)
+# Fortschrittsanzeige und Ergebnisprotokollierung in der UI
+# Autor: Copyright Manfred Zainhofer (08.04.2026)
+# Benutzung auf eigene Gefahr. Keine Haftung für Datenverlust oder Schäden.
+
 import os
 import sys
 import time
+import json
+import zipfile
 import threading
 import psutil
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *  # type: ignore[import-untyped]
-from tkinter import ttk, messagebox, StringVar, Canvas, PhotoImage
+from tkinter import ttk, messagebox, StringVar, Canvas, PhotoImage, filedialog, Menu, Toplevel
 
 
 def resource_path(relative_path: str) -> str:
@@ -13,6 +27,77 @@ def resource_path(relative_path: str) -> str:
     if hasattr(sys, "_MEIPASS"):
         return os.path.join(getattr(sys, "_MEIPASS"), relative_path)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+
+
+def runtime_dir() -> str:
+    """Liefert den Pfad, in dem externe Dateien (z. B. config) liegen sollen."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+DEFAULT_CONFIG = {
+    "window_title": "External Drive Tester v1.2",
+    "window_width": 1050,
+    "window_height": 1900,
+    "theme": "darkly",
+    "language": "de",
+    "supported_languages": ["de", "en", "fr", "es"],
+    "block_size_mb": 100,
+    "test_size_options": ["10 MB", "100 MB", "500 MB", "1 GB", "5 GB"],
+    "default_test_size": "100 MB",
+    "last_drive": "",
+    "last_directory": "",
+}
+
+def load_i18n() -> dict:
+    """Lädt Übersetzungen aus externer i18n.json mit robustem Fallback."""
+    i18n_path = os.path.join(runtime_dir(), "i18n.json")
+    fallback = {lang: {} for lang in DEFAULT_CONFIG["supported_languages"]}
+
+    if not os.path.exists(i18n_path):
+        return fallback
+
+    try:
+        with open(i18n_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return fallback
+
+    if not isinstance(data, dict):
+        return fallback
+
+    normalized: dict = {}
+    for lang, values in data.items():
+        if not isinstance(lang, str) or not isinstance(values, dict):
+            continue
+        key = lang.strip().lower()
+        if not key:
+            continue
+        normalized[key] = {str(k): str(v) for k, v in values.items()}
+
+    return normalized or fallback
+
+
+I18N = load_i18n()
+
+
+def load_theme_name() -> str:
+    """Lädt den Theme-Namen frühzeitig, bevor das Hauptfenster erzeugt wird."""
+    config_path = os.path.join(runtime_dir(), "ExternalDriveTester.config.json")
+    theme = str(DEFAULT_CONFIG["theme"])
+    if not os.path.exists(config_path):
+        return theme
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            candidate = loaded.get("theme")
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    except Exception:
+        pass
+    return theme
 
 class ExternalDriveTester:
     # Fenstergrößen (leicht anpassbar)
@@ -22,7 +107,20 @@ class ExternalDriveTester:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("External Drive Tester v1.0")
+        self.config_path = os.path.join(runtime_dir(), "ExternalDriveTester.config.json")
+        self.config = self.load_config()
+
+        self.WINDOW_WIDTH = int(self.config["window_width"])
+        self.WINDOW_HEIGHT = int(self.config["window_height"])
+        self.BLOCK_SIZE_MB = int(self.config["block_size_mb"])
+        self.theme_name = str(self.config["theme"])
+        self.language = str(self.config["language"])
+        self.supported_languages = list(self.config["supported_languages"])
+        self.test_size_values = list(self.config["test_size_options"])
+        self.default_test_size = str(self.config["default_test_size"])
+        self.language_var = StringVar(value=self.language)
+
+        self.root.title(str(self.config["window_title"]))
         self.root.geometry(f"{self.WINDOW_WIDTH}x{self.WINDOW_HEIGHT}")
         self.window_icon_img = None
         self.title_img = None
@@ -35,17 +133,575 @@ class ExternalDriveTester:
         self.test_in_progress = False
         self.test_thread = None
         self.stop_requested = False
-        self.verified_capacity_var = StringVar(value="Verifiziert geschrieben: -")
+        self.verified_capacity_var = StringVar(value=f"{self.t('ui_verified_written')}: -")
         self.block_cells: list = []
         self.block_base_colors: list[str] = []
         self.block_count = 0
         self._display_block_count = 0
         
         # Modernes Theme
-        self.style = tb.Style(theme="darkly")  # Alternativen: "superhero", "solar", "cyborg"
+        self.style = tb.Style(theme=self.theme_name)
         
         self.setup_ui()
+        self.create_menu()
         self.refresh_drives()
+
+    def t(self, key: str, **kwargs) -> str:
+        """Liefert lokalisierten Text anhand der aktiven Sprache."""
+        lang_map = I18N.get(self.language, I18N["de"])
+        text = lang_map.get(key, I18N["de"].get(key, key))
+        if kwargs:
+            try:
+                return text.format(**kwargs)
+            except Exception:
+                return text
+        return text
+
+    def create_menu(self) -> None:
+        """Erzeugt die Menüleiste mit den wichtigsten Funktionen."""
+        menu_bar = Menu(self.root)
+
+        file_menu = Menu(menu_bar, tearoff=0)
+        file_menu.add_command(label=self.t("menu_backup"), command=self.backup_selected_drive)
+        file_menu.add_command(label=self.t("menu_restore"), command=self.restore_backup_to_drive)
+        file_menu.add_separator()
+        file_menu.add_command(label=self.t("menu_open_config"), command=self.open_config_file)
+        file_menu.add_separator()
+        file_menu.add_command(label=self.t("menu_exit"), command=self.root.destroy)
+        menu_bar.add_cascade(label=self.t("menu_file"), menu=file_menu)
+
+        test_menu = Menu(menu_bar, tearoff=0)
+        test_menu.add_command(label=self.t("menu_test_start"), command=self.start_test)
+        test_menu.add_command(label=self.t("menu_test_stop"), command=self.request_stop)
+        test_menu.add_separator()
+        test_menu.add_checkbutton(label=self.t("menu_speed"), variable=self.test_speed)
+        test_menu.add_checkbutton(label=self.t("menu_integrity"), variable=self.test_integrity)
+        test_menu.add_checkbutton(label=self.t("menu_capacity"), variable=self.test_capacity)
+        test_menu.add_checkbutton(label=self.t("menu_full_capacity"), variable=self.full_capacity_test)
+        menu_bar.add_cascade(label=self.t("menu_test"), menu=test_menu)
+
+        tools_menu = Menu(menu_bar, tearoff=0)
+        tools_menu.add_command(label=self.t("menu_refresh_drives"), command=self.refresh_drives)
+        tools_menu.add_command(label=self.t("menu_refresh_map"), command=lambda: self.show_drive_overview(self.t("ui_drive_map")))
+        tools_menu.add_separator()
+        tools_menu.add_command(label=self.t("menu_reload_config"), command=self.reload_config)
+        tools_menu.add_command(label=self.t("menu_reset_config"), command=self.reset_config_to_defaults)
+        tools_menu.add_separator()
+        tools_menu.add_command(label=self.t("menu_clear_results"), command=self.clear_results)
+        tools_menu.add_command(label=self.t("menu_clear_log"), command=self.clear_progress_log)
+        menu_bar.add_cascade(label=self.t("menu_tools"), menu=tools_menu)
+
+        help_menu = Menu(menu_bar, tearoff=0)
+        help_menu.add_command(label=self.t("menu_about"), command=self.show_about)
+        menu_bar.add_cascade(label=self.t("menu_help"), menu=help_menu)
+
+        language_menu = Menu(menu_bar, tearoff=0)
+        language_entries = [
+            ("de", self.t("lang_de")),
+            ("en", self.t("lang_en")),
+            ("fr", self.t("lang_fr")),
+            ("es", self.t("lang_es")),
+        ]
+        for code, label in language_entries:
+            if code in self.supported_languages and code in I18N:
+                language_menu.add_radiobutton(
+                    label=label,
+                    value=code,
+                    variable=self.language_var,
+                    command=lambda c=code: self.change_language(c),
+                )
+        menu_bar.add_cascade(label=self.t("menu_language"), menu=language_menu)
+
+        self.root.config(menu=menu_bar)
+
+    def change_language(self, lang_code: str) -> None:
+        """Wechselt die Sprache, speichert sie und baut die UI neu auf."""
+        if lang_code == self.language:
+            return
+        if self.test_in_progress:
+            messagebox.showwarning(self.t("msg_warning"), self.t("msg_running_operation"))
+            self.language_var.set(self.language)
+            return
+        if lang_code not in I18N:
+            self.language_var.set(self.language)
+            return
+
+        self.language = lang_code
+        self.language_var.set(lang_code)
+        self.config["language"] = lang_code
+        self.save_config(self.config)
+        self._rebuild_ui_for_language_change()
+
+    def _rebuild_ui_for_language_change(self) -> None:
+        """Erstellt sichtbare UI-Elemente mit der neuen Sprache neu."""
+        selected_drive = self.selected_drive.get() if hasattr(self, "selected_drive") else ""
+        selected_test_size = self.test_size.get() if hasattr(self, "test_size") else ""
+        speed = self.test_speed.get() if hasattr(self, "test_speed") else True
+        integrity = self.test_integrity.get() if hasattr(self, "test_integrity") else True
+        capacity = self.test_capacity.get() if hasattr(self, "test_capacity") else True
+        full_capacity = self.full_capacity_test.get() if hasattr(self, "full_capacity_test") else False
+
+        for child in self.root.winfo_children():
+            child.destroy()
+
+        self.setup_ui()
+        self.create_menu()
+        self.refresh_drives()
+
+        self.test_speed.set(speed)
+        self.test_integrity.set(integrity)
+        self.test_capacity.set(capacity)
+        self.full_capacity_test.set(full_capacity)
+
+        if selected_test_size and selected_test_size in self.test_size_values:
+            self.test_size.set(selected_test_size)
+
+        if selected_drive:
+            for value in self.drive_combo["values"]:
+                if str(value).startswith(f"{selected_drive} ("):
+                    self.drive_combo.set(str(value))
+                    self.selected_drive.set(str(value))
+                    self.update_drive_info()
+                    break
+
+    def get_selected_drive_path(self) -> str:
+        """Liefert den aktuell gewählten Laufwerkspfad oder leeren String."""
+        selected = self.selected_drive.get().strip()
+        if not selected:
+            return ""
+        return selected.split(" (")[0]
+
+    def clear_results(self) -> None:
+        """Leert das Ergebnisfenster."""
+        self.results_text.config(state="normal")
+        self.results_text.delete(1.0, END)
+        self.results_text.config(state="disabled")
+
+    def clear_progress_log(self) -> None:
+        """Leert das Fortschrittslog."""
+        self.progress_log.config(state="normal")
+        self.progress_log.delete(1.0, END)
+        self.progress_log.config(state="disabled")
+
+    def open_config_file(self) -> None:
+        """Öffnet die externe JSON-Konfiguration im Standardeditor."""
+        if not os.path.exists(self.config_path):
+            self.save_config(dict(DEFAULT_CONFIG))
+        try:
+            if os.name == "nt":
+                os.startfile(self.config_path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                os.system(f'open "{self.config_path}"')
+            else:
+                os.system(f'xdg-open "{self.config_path}"')
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Konfigurationsdatei konnte nicht geöffnet werden:\n{e}")
+
+    def reload_config(self) -> None:
+        """Lädt die Konfiguration neu und übernimmt live-anwendbare Werte."""
+        old_language = self.language
+        self.config = self.load_config()
+        self.root.title(str(self.config["window_title"]))
+        self.BLOCK_SIZE_MB = int(self.config["block_size_mb"])
+        self.language = str(self.config["language"])
+        self.supported_languages = list(self.config["supported_languages"])
+        self.language_var.set(self.language)
+        self.test_size_values = list(self.config["test_size_options"])
+        self.default_test_size = str(self.config["default_test_size"])
+        self.test_size.configure(values=self.test_size_values)
+        if self.test_size.get() not in self.test_size_values:
+            self.test_size.set(self.default_test_size)
+        self.verified_capacity_var.set(f"{self.t('ui_verified_written')}: -")
+        if self.language != old_language:
+            self._rebuild_ui_for_language_change()
+        else:
+            self.show_drive_overview(self.t("ui_drive_map"))
+        messagebox.showinfo(
+            self.t("msg_config_reloaded_title"),
+            self.t("msg_config_reloaded"),
+        )
+
+    def reset_config_to_defaults(self) -> None:
+        """Schreibt Standardwerte in die Konfigurationsdatei."""
+        if not messagebox.askyesno(
+            self.t("msg_confirm"),
+            self.t("msg_reset_config"),
+        ):
+            return
+        self.save_config(dict(DEFAULT_CONFIG))
+        self.reload_config()
+
+    def backup_selected_drive(self) -> None:
+        """Sichert den Inhalt des ausgewählten Laufwerks in eine ZIP-Datei."""
+        drive_path = self.get_selected_drive_path()
+        if not drive_path:
+            messagebox.showerror(self.t("msg_error"), self.t("msg_choose_drive"))
+            return
+
+        default_name = f"backup_{drive_path.replace(':', '').replace('\\\\', '')}_{time.strftime('%Y%m%d_%H%M%S')}.zip"
+        last_dir = str(self.config.get("last_directory", ""))
+        initial_save_dir = last_dir if last_dir and os.path.isdir(last_dir) else os.path.join(os.path.expanduser("~"), "Documents")
+        if not os.path.isdir(initial_save_dir):
+            initial_save_dir = runtime_dir()
+        target_zip = filedialog.asksaveasfilename(
+            title="Backup speichern unter",
+            defaultextension=".zip",
+            initialdir=initial_save_dir,
+            initialfile=default_name,
+            filetypes=[("ZIP-Archiv", "*.zip")],
+        )
+        if not target_zip:
+            return
+
+        chosen_dir = os.path.dirname(os.path.abspath(target_zip))
+        if os.path.isdir(chosen_dir):
+            self.config["last_directory"] = chosen_dir
+            self.save_config(self.config)
+
+        target_zip = target_zip.strip()
+        if not target_zip.lower().endswith(".zip"):
+            target_zip = target_zip + ".zip"
+
+        # Vermeidet Abhängigkeit vom aktuellen Arbeitsverzeichnis, das evtl. nicht mehr existiert.
+        if os.path.isabs(target_zip):
+            target_zip_abs = os.path.normpath(target_zip)
+        else:
+            target_zip_abs = os.path.normpath(os.path.join(runtime_dir(), target_zip))
+
+        target_parent = os.path.dirname(target_zip_abs)
+        if target_parent and not os.path.exists(target_parent):
+            try:
+                os.makedirs(target_parent, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror(self.t("msg_error"), f"Backup-Zielordner konnte nicht erstellt werden:\n{e}")
+                return
+
+        self.add_result(f"🗄️ Starte Backup von {drive_path} nach {target_zip_abs}")
+        try:
+            total_items, total_bytes = self._scan_backup_content(drive_path)
+            self.add_result(
+                f"   Zu sichern: {total_items} Einträge, {self.format_size(total_bytes)}"
+            )
+
+            saved = 0
+            skipped = 0
+            saved_bytes = 0
+
+            drive_total = psutil.disk_usage(drive_path).total
+            with zipfile.ZipFile(target_zip_abs, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+                meta = json.dumps({"drive_total": drive_total, "drive_path": drive_path})
+                zf.writestr("_backup_meta.json", meta)
+                for root_dir, dirs, files in os.walk(drive_path):
+                    rel_root = os.path.relpath(root_dir, drive_path)
+
+                    # Leere Verzeichnisse als eigene ZIP-Einträge sichern.
+                    if rel_root != "." and not dirs and not files:
+                        zf.writestr(rel_root.replace("\\", "/") + "/", "")
+                        saved += 1
+                        self._update_backup_progress(saved, total_items)
+                        continue
+
+                    for name in files:
+                        full_path = os.path.join(root_dir, name)
+                        if os.path.abspath(full_path) == target_zip_abs:
+                            # Falls das Backup auf demselben Laufwerk liegt, darf es nicht mitgesichert werden.
+                            continue
+                        rel_path = os.path.relpath(full_path, drive_path)
+                        arcname = rel_path.replace("\\", "/")
+
+                        try:
+                            file_size = os.path.getsize(full_path)
+                            zf.write(full_path, arcname=arcname)
+                            saved += 1
+                            saved_bytes += file_size
+                        except Exception:
+                            skipped += 1
+                        self._update_backup_progress(saved + skipped, total_items)
+
+            self.add_result(
+                f"✅ Backup erfolgreich erstellt ({saved} gesichert, {skipped} übersprungen, {self.format_size(saved_bytes)})"
+            )
+            messagebox.showinfo(
+                "Backup",
+                f"Backup erfolgreich erstellt.\nGesichert: {saved}\nÜbersprungen: {skipped}",
+            )
+        except Exception as e:
+            self.add_result(f"❌ Backup fehlgeschlagen: {e}")
+            messagebox.showerror("Backup-Fehler", str(e))
+
+    def restore_backup_to_drive(self) -> None:
+        """Stellt ein ZIP-Backup auf dem ausgewählten Laufwerk wieder her."""
+        drive_path = self.get_selected_drive_path()
+        if not drive_path:
+            messagebox.showerror(self.t("msg_error"), self.t("msg_choose_drive"))
+            return
+
+        last_dir = str(self.config.get("last_directory", ""))
+        initial_open_dir = last_dir if last_dir and os.path.isdir(last_dir) else os.path.join(os.path.expanduser("~"), "Documents")
+        source_zip = filedialog.askopenfilename(
+            title="Backup auswählen",
+            initialdir=initial_open_dir,
+            filetypes=[("ZIP-Archiv", "*.zip")],
+        )
+        if not source_zip:
+            return
+
+        chosen_dir = os.path.dirname(os.path.abspath(source_zip))
+        if os.path.isdir(chosen_dir):
+            self.config["last_directory"] = chosen_dir
+            self.save_config(self.config)
+
+        if not messagebox.askyesno(
+            "Wiederherstellen",
+            "Backup auf dem Laufwerk wiederherstellen?\n"
+            "Bestehende Dateien werden überschrieben.",
+        ):
+            return
+
+        # --- Laufwerksgrößen-Prüfung ---
+        try:
+            with zipfile.ZipFile(source_zip, "r") as zf_check:
+                if "_backup_meta.json" in zf_check.namelist():
+                    meta = json.loads(zf_check.read("_backup_meta.json").decode("utf-8"))
+                    backup_total = meta.get("drive_total", 0)
+                    target_total = psutil.disk_usage(drive_path).total
+                    if backup_total > 0:
+                        ratio = abs(target_total - backup_total) / backup_total
+                        if ratio > 0.10:
+                            proceed = messagebox.askyesno(
+                                "Laufwerksgröße weicht ab",
+                                f"Das Backup wurde von einem Laufwerk mit {self.format_size(backup_total)} erstellt.\n"
+                                f"Das Ziel-Laufwerk hat {self.format_size(target_total)}.\n\n"
+                                "Die Größen weichen um mehr als 10\u202F% ab.\n"
+                                "Trotzdem fortfahren?",
+                            )
+                            if not proceed:
+                                return
+        except Exception:
+            pass  # Ältere Backups ohne Metadaten – kein Fehler
+
+        self.add_result(f"📥 Starte Restore von {source_zip} nach {drive_path}")
+        try:
+            with zipfile.ZipFile(source_zip, "r") as zf:
+                members = zf.infolist()
+                if not members:
+                    raise RuntimeError("ZIP-Archiv ist leer")
+
+                restored = 0
+                skipped = 0
+                for idx, member in enumerate(members, start=1):
+                    if member.filename == "_backup_meta.json":
+                        continue
+                    try:
+                        self._safe_extract_member(zf, member, drive_path)
+                        restored += 1
+                    except Exception:
+                        skipped += 1
+
+                    progress = int((idx / len(members)) * 100)
+                    self.update_progress(progress, f"Restore {idx}/{len(members)}")
+
+            self.add_result(
+                f"✅ Restore erfolgreich abgeschlossen ({restored} wiederhergestellt, {skipped} übersprungen)"
+            )
+            messagebox.showinfo(
+                "Restore",
+                f"Backup wurde wiederhergestellt.\nWiederhergestellt: {restored}\nÜbersprungen: {skipped}",
+            )
+            self.refresh_drives()
+        except Exception as e:
+            self.add_result(f"❌ Restore fehlgeschlagen: {e}")
+            messagebox.showerror("Restore-Fehler", str(e))
+
+    def _scan_backup_content(self, drive_path: str) -> tuple[int, int]:
+        """Ermittelt Anzahl und Gesamtgröße der sicherbaren Einträge."""
+        total_items = 0
+        total_bytes = 0
+        for root_dir, dirs, files in os.walk(drive_path):
+            if os.path.relpath(root_dir, drive_path) != "." and not dirs and not files:
+                total_items += 1
+            for name in files:
+                full_path = os.path.join(root_dir, name)
+                try:
+                    total_bytes += os.path.getsize(full_path)
+                    total_items += 1
+                except Exception:
+                    pass
+        return total_items, total_bytes
+
+    def _update_backup_progress(self, current: int, total: int) -> None:
+        """Aktualisiert den Fortschritt während des Backups."""
+        if total <= 0:
+            self.update_progress(0, "Backup wird vorbereitet...")
+            return
+        pct = int((current / total) * 100)
+        self.update_progress(pct, f"Backup {current}/{total}")
+
+    def _clear_drive_contents(self, drive_path: str) -> None:
+        """Löscht alle Inhalte eines Laufwerks vor der Wiederherstellung."""
+        for item in os.listdir(drive_path):
+            full = os.path.join(drive_path, item)
+            try:
+                if os.path.isdir(full) and not os.path.islink(full):
+                    for root_dir, dirs, files in os.walk(full, topdown=False):
+                        for fname in files:
+                            os.remove(os.path.join(root_dir, fname))
+                        for dname in dirs:
+                            os.rmdir(os.path.join(root_dir, dname))
+                    os.rmdir(full)
+                else:
+                    os.remove(full)
+            except Exception:
+                # Einzelne geschützte Systemdateien können auf Wechseldatenträgern nicht löschbar sein.
+                continue
+
+    def _safe_extract_member(self, zf: zipfile.ZipFile, member: zipfile.ZipInfo, target_dir: str) -> None:
+        """Extrahiert ZIP-Eintrag sicher in das Zielverzeichnis (ohne Path Traversal)."""
+        normalized_name = member.filename.replace("\\", "/")
+        if normalized_name.startswith("/") or ".." in normalized_name.split("/"):
+            raise ValueError(f"Unsicherer ZIP-Pfad: {member.filename}")
+
+        destination = os.path.abspath(os.path.join(target_dir, normalized_name))
+        target_base = os.path.abspath(target_dir)
+        try:
+            if os.path.commonpath([target_base, destination]) != target_base:
+                raise ValueError(f"ZIP-Eintrag außerhalb Zielpfad: {member.filename}")
+        except ValueError:
+            raise ValueError(f"ZIP-Eintrag außerhalb Zielpfad: {member.filename}")
+
+        if member.is_dir() or normalized_name.endswith("/"):
+            os.makedirs(destination, exist_ok=True)
+            return
+
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        with zf.open(member, "r") as src, open(destination, "wb") as dst:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+
+    def show_about(self) -> None:
+        """Zeigt eine kurze Programminfo an."""
+        app_title = self.t("ui_title")
+        about_title = self.t("about_title", app_title=app_title)
+        about_text = self.t("about_text", app_title=app_title, config_path=self.config_path)
+
+        about_win = Toplevel(self.root)
+        about_win.title(about_title)
+        about_win.transient(self.root)
+        about_win.resizable(False, False)
+
+        container = tb.Frame(about_win, padding=14)
+        container.pack(fill=BOTH, expand=YES)
+
+        title_candidates = [
+            "titel.png",
+            "ExternalDriveTesterTR.png",
+            "ExternalDriveTester1.png",
+        ]
+        for candidate in title_candidates:
+            title_file = resource_path(candidate)
+            if not os.path.exists(title_file):
+                continue
+            try:
+                about_win._title_img = PhotoImage(file=title_file)  # type: ignore[attr-defined]
+                tb.Label(container, image=about_win._title_img).pack(anchor=W, pady=(0, 10))  # type: ignore[attr-defined]
+                break
+            except Exception:
+                continue
+
+        tb.Label(
+            container,
+            text=about_text,
+            justify=LEFT,
+            anchor=W,
+            wraplength=640,
+        ).pack(fill=BOTH, expand=YES)
+
+        tb.Button(
+            container,
+            text=self.t("about_close"),
+            command=about_win.destroy,
+            bootstyle="secondary",
+            width=14,
+        ).pack(anchor=E, pady=(12, 0))
+
+        about_win.grab_set()
+        about_win.focus_set()
+
+    def load_config(self) -> dict:
+        """Lädt Konfiguration aus JSON und fällt bei Fehlern auf Defaults zurück."""
+        config = dict(DEFAULT_CONFIG)
+
+        if not os.path.exists(self.config_path):
+            self.save_config(config)
+            return config
+
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+        except Exception:
+            self.save_config(config)
+            return config
+
+        if not isinstance(loaded, dict):
+            self.save_config(config)
+            return config
+
+        if isinstance(loaded.get("window_title"), str) and loaded["window_title"].strip():
+            config["window_title"] = loaded["window_title"].strip()
+
+        for key in ("window_width", "window_height", "block_size_mb"):
+            value = loaded.get(key)
+            if isinstance(value, (int, float)):
+                config[key] = max(1, int(value))
+
+        if isinstance(loaded.get("theme"), str) and loaded["theme"].strip():
+            config["theme"] = loaded["theme"].strip()
+
+        supported_languages = loaded.get("supported_languages")
+        if isinstance(supported_languages, list):
+            normalized_langs = [str(v).strip().lower() for v in supported_languages if str(v).strip()]
+            valid_langs = [v for v in normalized_langs if v in I18N]
+            if valid_langs:
+                config["supported_languages"] = valid_langs
+
+        language = loaded.get("language")
+        if isinstance(language, str) and language.strip().lower() in I18N:
+            config["language"] = language.strip().lower()
+
+        if config["language"] not in config["supported_languages"]:
+            config["language"] = config["supported_languages"][0]
+
+        options = loaded.get("test_size_options")
+        if isinstance(options, list):
+            normalized = [str(v).strip() for v in options if str(v).strip()]
+            if normalized:
+                config["test_size_options"] = normalized
+
+        default_size = loaded.get("default_test_size")
+        if isinstance(default_size, str) and default_size.strip():
+            config["default_test_size"] = default_size.strip()
+
+        if config["default_test_size"] not in config["test_size_options"]:
+            config["default_test_size"] = config["test_size_options"][0]
+
+        if isinstance(loaded.get("last_drive"), str):
+            config["last_drive"] = loaded["last_drive"].strip()
+
+        if isinstance(loaded.get("last_directory"), str):
+            config["last_directory"] = loaded["last_directory"].strip()
+
+        return config
+
+    def save_config(self, config: dict) -> None:
+        """Schreibt die Konfiguration als editierbare JSON-Datei."""
+        try:
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def set_window_icon(self):
         """Setzt das Fenstersymbol fuer Titlebar und Taskleiste."""
@@ -73,19 +729,30 @@ class ExternalDriveTester:
         main_frame = tb.Frame(self.root, padding=20)
         main_frame.pack(fill=BOTH, expand=YES)
         
-        # Headerbild statt Texttitel
-        title_file = resource_path("titel.png")
-        if os.path.exists(title_file):
+        # Headerbild statt Texttitel (mit robuster Dateisuche)
+        title_candidates = [
+            "titel.png",
+            "ExternalDriveTesterTR.png",
+            "ExternalDriveTester1.png",
+        ]
+        loaded_title = False
+        for candidate in title_candidates:
+            title_file = resource_path(candidate)
+            if not os.path.exists(title_file):
+                continue
             try:
                 self.title_img = PhotoImage(file=title_file)
                 tb.Label(main_frame, image=self.title_img).pack(pady=(0, 20))
+                loaded_title = True
+                break
             except Exception:
-                tb.Label(main_frame, text="Externe Datenträger Test Tool", font=("Helvetica", 18, "bold")).pack(pady=(0, 20))
-        else:
-            tb.Label(main_frame, text="Externe Datenträger Test Tool", font=("Helvetica", 18, "bold")).pack(pady=(0, 20))
+                continue
+
+        if not loaded_title:
+            tb.Label(main_frame, text=self.t("ui_title"), font=("Helvetica", 18, "bold")).pack(pady=(0, 20))
         
         # Drive Selection Frame
-        drive_frame = ttk.LabelFrame(main_frame, text="Datenträger auswählen", padding=15)
+        drive_frame = ttk.LabelFrame(main_frame, text=self.t("ui_drive_select"), padding=15)
         drive_frame.pack(fill=X, pady=(0, 15))
         
         # Zeile 1: Laufwerk + Aktualisieren
@@ -98,7 +765,7 @@ class ExternalDriveTester:
         # FIX 1: Laufwerkswechsel bindet Infoanzeige
         self.drive_combo.bind("<<ComboboxSelected>>", self.update_drive_info)
 
-        refresh_btn = tb.Button(drive_top_row, text="🔄 Aktualisieren",
+        refresh_btn = tb.Button(drive_top_row, text=self.t("ui_refresh"),
                        command=self.refresh_drives, bootstyle="info")
         refresh_btn.pack(side=LEFT)
 
@@ -107,17 +774,17 @@ class ExternalDriveTester:
         self.info_text.pack(fill=X, pady=(10, 0))
         
         # Test Options Frame
-        test_frame = ttk.LabelFrame(main_frame, text="Testoptionen", padding=15)
+        test_frame = ttk.LabelFrame(main_frame, text=self.t("ui_test_options"), padding=15)
         test_frame.pack(fill=X, pady=(0, 15))
         
         # Test size
         size_frame = tb.Frame(test_frame)
         size_frame.pack(fill=X, pady=(0, 10))
         
-        tb.Label(size_frame, text="Testgröße:").pack(side=LEFT, padx=(0, 10))
-        self.test_size = tb.Combobox(size_frame, values=["10 MB", "100 MB", "500 MB", "1 GB", "5 GB"],
+        tb.Label(size_frame, text=self.t("ui_test_size")).pack(side=LEFT, padx=(0, 10))
+        self.test_size = tb.Combobox(size_frame, values=self.test_size_values,
                                      state="readonly", width=15)
-        self.test_size.set("100 MB")
+        self.test_size.set(self.default_test_size)
         self.test_size.pack(side=LEFT)
         
         # Test types
@@ -129,16 +796,16 @@ class ExternalDriveTester:
         self.test_capacity = tb.BooleanVar(value=True)
         self.full_capacity_test = tb.BooleanVar(value=False)
         
-        tb.Checkbutton(checks_frame, text="Geschwindigkeitstest", variable=self.test_speed,
+        tb.Checkbutton(checks_frame, text=self.t("menu_speed"), variable=self.test_speed,
                       bootstyle="info").pack(side=LEFT, padx=(0, 15))
-        tb.Checkbutton(checks_frame, text="Integritätstest", variable=self.test_integrity,
+        tb.Checkbutton(checks_frame, text=self.t("menu_integrity"), variable=self.test_integrity,
                       bootstyle="info").pack(side=LEFT, padx=(0, 15))
-        tb.Checkbutton(checks_frame, text="Kapazitätsprüfung", variable=self.test_capacity,
+        tb.Checkbutton(checks_frame, text=self.t("menu_capacity"), variable=self.test_capacity,
                       bootstyle="info").pack(side=LEFT)
 
         tb.Checkbutton(
             test_frame,
-            text="Vollständiger Kapazitätstest (bis Datenträger voll)",
+            text=self.t("ui_full_capacity"),
             variable=self.full_capacity_test,
             bootstyle="warning",
         ).pack(anchor=W, pady=(0, 10))
@@ -147,18 +814,18 @@ class ExternalDriveTester:
         button_row = tb.Frame(test_frame)
         button_row.pack(pady=(10, 0), fill=X)
 
-        self.start_btn = tb.Button(button_row, text="▶ Test starten",
+        self.start_btn = tb.Button(button_row, text=self.t("ui_start"),
                       command=self.start_test, bootstyle="success",
                       width=20)
         self.start_btn.pack(side=LEFT)
 
-        self.stop_btn = tb.Button(button_row, text="■ Abbrechen",
+        self.stop_btn = tb.Button(button_row, text=self.t("ui_stop"),
                       command=self.request_stop, bootstyle="danger",
                       width=20, state="disabled")
         self.stop_btn.pack(side=LEFT, padx=(10, 0))
         
         # Progress Frame
-        progress_frame = ttk.LabelFrame(main_frame, text="Testfortschritt", padding=15)
+        progress_frame = ttk.LabelFrame(main_frame, text=self.t("ui_progress"), padding=15)
         progress_frame.pack(fill=BOTH, expand=YES, pady=(0, 15))
         
         # Progress bar
@@ -167,7 +834,7 @@ class ExternalDriveTester:
         self.progress.pack(fill=X, pady=(0, 10))
         
         # Status label
-        self.status_label = tb.Label(progress_frame, text="Bereit", font=("", 10))
+        self.status_label = tb.Label(progress_frame, text=self.t("ui_ready"), font=("", 10))
         self.status_label.pack()
 
         # Dauerhafte Anzeige der verifizierten Nutzkapazität
@@ -180,7 +847,7 @@ class ExternalDriveTester:
         self.verified_capacity_label.pack(anchor=W, pady=(4, 0))
 
         # Block Map – Phasenbeschriftung
-        self.block_phase_label = tb.Label(progress_frame, text="Laufwerksabbild", font=("Consolas", 8))
+        self.block_phase_label = tb.Label(progress_frame, text=self.t("ui_drive_map"), font=("Consolas", 8))
         self.block_phase_label.pack(anchor=W, pady=(8, 2))
 
         # Block Map – Canvas mit Scrollbar
@@ -194,7 +861,7 @@ class ExternalDriveTester:
         
         self.block_canvas.pack(side=LEFT, fill=BOTH, expand=YES)
         scrollbar.pack(side=RIGHT, fill=Y)
-        self.block_canvas.bind("<Configure>", lambda _e: self.show_drive_overview("Laufwerksabbild"))
+        self.block_canvas.bind("<Configure>", lambda _e: self.show_drive_overview(self.t("ui_drive_map")))
 
         # Legende
         legend_frame = tb.Frame(progress_frame)
@@ -211,10 +878,16 @@ class ExternalDriveTester:
         
         self.progress_log.pack(side=LEFT, fill=BOTH, expand=YES)
         scrollbar.pack(side=RIGHT, fill=Y)
-        for _col, _lbl in [("#6c757d", "Belegt"), ("#2a2a2a", "Frei"),
-                    ("#3498db", "Schreiben"), ("#9b59b6", "Lesen"),
-                    ("#2ecc71", "Gut"), ("#f39c12", "Langsam"),
-                    ("#e74c3c", "Fehler")]:
+        legend_items = [
+            ("#6c757d", self.t("legend_used")),
+            ("#2a2a2a", self.t("legend_free")),
+            ("#3498db", self.t("legend_writing")),
+            ("#9b59b6", self.t("legend_reading")),
+            ("#2ecc71", self.t("legend_good")),
+            ("#f39c12", self.t("legend_slow")),
+            ("#e74c3c", self.t("legend_error")),
+        ]
+        for _col, _lbl in legend_items:
             _f = tb.Frame(legend_frame)
             _f.pack(side=LEFT, padx=(0, 10))
             swatch = Canvas(
@@ -231,7 +904,7 @@ class ExternalDriveTester:
             tb.Label(_f, text=_lbl, font=("", 7)).pack(side=LEFT)
 
         # Results Frame (scrollable)
-        results_frame = ttk.LabelFrame(main_frame, text="Ergebnisse", padding=15)
+        results_frame = ttk.LabelFrame(main_frame, text=self.t("ui_results"), padding=15)
         results_frame.pack(fill=BOTH, expand=YES)
         
         self.results_text = tb.Text(results_frame, height=12, wrap="word",
@@ -270,10 +943,17 @@ class ExternalDriveTester:
         self.drive_combo['values'] = drive_paths
         
         if drive_paths:
-            self.drive_combo.set(drive_paths[0])
+            last = str(self.config.get("last_drive", "")).rstrip("\\").rstrip("/")
+            matched = next((v for v in drive_paths if v.split(" (")[0].rstrip("\\").rstrip("/") == last), None) if last else None
+            selected = matched or drive_paths[0]
+            self.selected_drive.set(selected)
+            self.drive_combo.set(selected)
+            drive_path = selected.split(" (")[0]
+            self.config["last_drive"] = drive_path
+            self.save_config(self.config)
             self.update_drive_info()
         else:
-            self.show_drive_overview("Kein Laufwerk gefunden")
+            self.show_drive_overview(self.t("status_no_drive"))
     
     def update_drive_info(self, event=None):
         """Zeige Informationen zum ausgewählten Laufwerk"""
@@ -281,22 +961,25 @@ class ExternalDriveTester:
             return
         
         drive_path = self.selected_drive.get().split(" (")[0]
+        if event is not None:
+            self.config["last_drive"] = drive_path
+            self.save_config(self.config)
         
         try:
             usage = psutil.disk_usage(drive_path)
             info = f"""
-📊 Laufwerksinformationen:
-   Pfad: {drive_path}
-   Gesamt: {self.format_size(usage.total)}
-   Belegt: {self.format_size(usage.used)}
-   Frei: {self.format_size(usage.free)}
-   Auslastung: {usage.percent}%
+{self.t("ui_drive_info_title")}
+    {self.t("ui_drive_info_path")}: {drive_path}
+    {self.t("ui_drive_info_total")}: {self.format_size(usage.total)}
+    {self.t("ui_drive_info_used")}: {self.format_size(usage.used)}
+    {self.t("ui_drive_info_free")}: {self.format_size(usage.free)}
+    {self.t("ui_drive_info_usage")}: {usage.percent}%
             """
             self.info_text.config(state="normal")
             self.info_text.delete(1.0, END)
             self.info_text.insert(1.0, info)
             self.info_text.config(state="disabled")
-            self.show_drive_overview("Laufwerksabbild")
+            self.show_drive_overview(self.t("ui_drive_map"))
         except:
             pass
     
@@ -319,8 +1002,10 @@ class ExternalDriveTester:
     # Block-Karte
     # ------------------------------------------------------------------
 
-    def show_drive_overview(self, phase_label: str = "Laufwerksabbild") -> None:
+    def show_drive_overview(self, phase_label: str = "") -> None:
         """Zeigt ein fixes Laufwerks-Abbild (belegt/frei) an."""
+        if not phase_label:
+            phase_label = self.t("ui_drive_map")
         self.root.after(0, lambda: self._draw_block_map(phase_label))
 
     def init_block_map(self, n_blocks: int, phase_label: str = "") -> None:
@@ -420,7 +1105,7 @@ class ExternalDriveTester:
         """Fordert einen sicheren Abbruch des laufenden Tests an."""
         if self.test_in_progress:
             self.stop_requested = True
-            self.root.after(0, lambda: self.status_label.configure(text="Abbruch angefordert..."))
+            self.root.after(0, lambda: self.status_label.configure(text=self.t("status_abort_requested")))
 
     def check_abort(self):
         """Wirft eine Ausnahme, wenn der Nutzer den Abbruch angefordert hat."""
@@ -439,24 +1124,24 @@ class ExternalDriveTester:
         self.root.after(
             0,
             lambda: self.verified_capacity_var.set(
-                f"Verifiziert geschrieben: {self.format_size(bytes_value)}"
+                f"{self.t('ui_verified_written')}: {self.format_size(bytes_value)}"
             ),
         )
 
     def start_test(self):
         """Starte den Test in einem separaten Thread"""
         if self.test_in_progress:
-            messagebox.showwarning("Warnung", "Ein Test läuft bereits!")
+            messagebox.showwarning(self.t("msg_warning"), self.t("msg_running_operation"))
             return
         
         if not self.selected_drive.get():
-            messagebox.showerror("Fehler", "Bitte wählen Sie ein Laufwerk aus!")
+            messagebox.showerror(self.t("msg_error"), self.t("msg_choose_drive"))
             return
         
         self.test_in_progress = True
         self.stop_requested = False
         self.set_verified_capacity(0)
-        self.start_btn.config(state="disabled", text="⏳ Test läuft...")
+        self.start_btn.config(state="disabled", text=self.t("status_test_running"))
         self.stop_btn.config(state="normal")
         self.results_text.config(state="normal")
         self.results_text.delete(1.0, END)
@@ -799,12 +1484,12 @@ class ExternalDriveTester:
     def test_finished(self):
         """Setze UI nach Test zurück"""
         self.test_in_progress = False
-        self.start_btn.config(state="normal", text="▶ Test starten")
+        self.start_btn.config(state="normal", text=self.t("ui_start"))
         self.stop_btn.config(state="disabled")
-        self.status_label.configure(text="Bereit")
-        self.show_drive_overview("Laufwerksabbild")
+        self.status_label.configure(text=self.t("ui_ready"))
+        self.show_drive_overview(self.t("ui_drive_map"))
 
 if __name__ == "__main__":
-    root = tb.Window(themename="darkly")
+    root = tb.Window(themename=load_theme_name())
     app = ExternalDriveTester(root)
     root.mainloop()

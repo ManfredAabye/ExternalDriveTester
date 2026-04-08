@@ -1,0 +1,24 @@
+{
+  "window_title": "External Drive Tester v1.2",
+  "window_width": 1050,
+  "window_height": 1900,
+  "theme": "darkly",
+  "language": "de",
+  "supported_languages": [
+    "de",
+    "en",
+    "fr",
+    "es"
+  ],
+  "block_size_mb": 100,
+  "test_size_options": [
+    "10 MB",
+    "100 MB",
+    "500 MB",
+    "1 GB",
+    "5 GB"
+  ],
+  "default_test_size": "100 MB",
+  "last_drive": "E:\\",
+  "last_directory": "D:\\test"
+}

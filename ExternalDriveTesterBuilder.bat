@@ -65,6 +65,8 @@ python -m PyInstaller ^
 	--add-data "icon.ico;." ^
 	--add-data "window.png;." ^
 	--add-data "titel.png;." ^
+	--add-data "ExternalDriveTesterTR.png;." ^
+	--add-data "ExternalDriveTester1.png;." ^
   --collect-all ttkbootstrap ^
   "%SCRIPT%"
 
@@ -81,6 +83,9 @@ echo [OK] EXE: "%~dp0dist\%APP_NAME%.exe"
 if exist "%ICON_ICO%" copy /y "%ICON_ICO%" "dist\%ICON_ICO%" >nul
 if exist "window.png" copy /y "window.png" "dist\window.png" >nul
 if exist "titel.png" copy /y "titel.png" "dist\titel.png" >nul
+if exist "ExternalDriveTesterTR.png" copy /y "ExternalDriveTesterTR.png" "dist\ExternalDriveTesterTR.png" >nul
+if exist "ExternalDriveTester1.png" copy /y "ExternalDriveTester1.png" "dist\ExternalDriveTester1.png" >nul
+if exist "i18n.json" copy /y "i18n.json" "dist\i18n.json" >nul
 echo [OK] Zusatzdateien nach dist kopiert (falls vorhanden).
 echo.
 pause

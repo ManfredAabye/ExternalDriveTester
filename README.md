@@ -4,4 +4,16 @@
 
 <img src="https://raw.githubusercontent.com/ManfredAabye/ExternalDriveTester/refs/heads/main/ExternalDriveTesterTR.png" alt="Project Badge">
 
-External Drive Tester
+External Drive Tester ist ein modernes, benutzerfreundliches Testprogramm für externe Datenträger (wie USB-Sticks und externe Festplatten).
+
+Funktionen:
+
+- Kapazitätsprüfung (verifizierte Schreib-/Lese-Tests)
+- Geschwindigkeitsmessung (Schreib-/Lesegeschwindigkeit)
+- Integritätstest (Datenkonsistenzprüfung)
+- Backup/Restore ganzer Laufwerke als ZIP-Archiv
+
+Konfiguration über externe JSON-Datei (z. B. unterstützte Sprachen, Theme, Testgrößen)
+Fortschrittsanzeige und Ergebnisprotokollierung in der UI
+Autor: Copyright Manfred Zainhofer (08.04.2026)
+Benutzung auf eigene Gefahr. Keine Haftung für Datenverlust oder Schäden.
