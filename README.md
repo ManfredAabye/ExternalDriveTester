@@ -6,7 +6,7 @@
 
 ## Deutsch
 
-ExternalDriveTester ist ein modernes, benutzerfreundliches Testprogramm fuer externe Datentraeger (wie USB-Sticks und externe Festplatten).
+ExternalDriveTester ist ein modernes, benutzerfreundliches Testprogramm fuer externe Datentraeger (wie USB-Sticks, SD-Karten und externe Festplatten).
 
 Funktionen:
 
@@ -27,7 +27,7 @@ Benutzung auf eigene Gefahr. Keine Haftung fuer Datenverlust oder Schaeden.
 
 ## English
 
-ExternalDriveTester is a modern, user-friendly testing tool for external storage devices (such as USB flash drives and external hard drives).
+ExternalDriveTester is a modern, user-friendly testing tool for external storage devices (such as USB flash drives, SD card and external hard drives).
 
 Features:
 
@@ -48,7 +48,7 @@ Use at your own risk. No liability for data loss or damages.
 
 ## Francais
 
-ExternalDriveTester est un outil moderne et convivial pour tester des supports de stockage externes (comme les cles USB et les disques durs externes).
+ExternalDriveTester est un outil moderne et convivial pour tester des supports de stockage externes (comme les cles USB, SD et les disques durs externes).
 
 Fonctionnalites :
 
@@ -69,7 +69,7 @@ Utilisation a vos propres risques. Aucune responsabilite en cas de perte de donn
 
 ## Espanol
 
-ExternalDriveTester es una herramienta moderna y facil de usar para probar unidades de almacenamiento externas (como memorias USB y discos duros externos).
+ExternalDriveTester es una herramienta moderna y facil de usar para probar unidades de almacenamiento externas (como memorias USB, SD y discos duros externos).
 
 Funciones:
 
